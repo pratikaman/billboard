@@ -1,0 +1,8 @@
+.DS_Store
+build/
+bin/
+Billboard.app/
+# downloaded third-party reference photos (not ours to redistribute)
+refs/
+# early image-gen art pass, not used by the app
+Art/
