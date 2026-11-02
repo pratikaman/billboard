@@ -6,7 +6,7 @@ import QuartzCore
 
 // MARK: - Glyphs
 
-enum FlapStyle: Int { case dark, dim, red, orange, yellow, green, blue, violet }
+enum FlapStyle: Int { case dark, dim, coral, red, orange, yellow, green, blue, violet }
 
 struct Glyph: Hashable {
     var ch: Character
@@ -15,7 +15,7 @@ struct Glyph: Hashable {
     static func tile(_ s: FlapStyle) -> Glyph { Glyph(ch: " ", style: s) }
 }
 
-let drum: [Character] = Array(" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:-/'?!&+#_()")
+let drum: [Character] = Array(" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:-/'?!&+#_()*>§")   // * = Claude spark, § = OpenAI logo
 let drumIndex: [Character: Int] = Dictionary(uniqueKeysWithValues: drum.enumerated().map { ($1, $0) })
 
 /// Uppercases, strips accents, maps anything the drum can't show to a space, and fits to n cells
@@ -49,6 +49,7 @@ enum Pal {
     static let flapBottom = (rgb(0x1c1c1e), rgb(0x18181a))
     static let ink = rgb(0xe8e7e3)
     static let inkDim = rgb(0x77777a)
+    static let coral = rgb(0xe8825f)   // Claude's mark
     static let label = rgb(0x8d8d90)
     static let tiles: [FlapStyle: NSColor] = [
         .red: rgb(0xda291c), .orange: rgb(0xff7500), .yellow: rgb(0xffb81c),
@@ -65,8 +66,8 @@ struct BoardLayout {
     var scale: CGFloat = 1
     var rows = 1
     /// Column spans in cells; columns are separated by one always-blank pocket, like words on a Vestaboard.
-    static let cols = [5, 11, 24, 11]          // TIME, SESSION, NOW, STATUS
-    static let labels = ["TIME", "SESSION", "NOW", "STATUS"]
+    static let cols = [5, 1, 10, 23, 11]       // TIME, agent mark, SESSION, NOW, STATUS
+    static let labels = ["TIME", "", "SESSION", "NOW", "STATUS"]
     static var cellsPerRow: Int { cols.reduce(0, +) + cols.count - 1 }
     /// Grid index of the k-th content cell (skipping separators).
     static let gridIndex: [Int] = {
@@ -283,9 +284,13 @@ final class FlipBoardView: NSView {
         } else {
             grad(topR, Pal.flapTop.0, Pal.flapTop.1)
             grad(botR, Pal.flapBottom.0, Pal.flapBottom.1)
-            if g.ch != " " {
+            if g.ch == "*" || g.ch == "§" {   // agent marks: Claude logo (*) / OpenAI logo (§), drawn rather than typeset
+                let side = W * 0.92
+                let color = g.style == .coral ? Pal.coral : (g.style == .dim ? Pal.inkDim : Pal.ink)
+                drawAgentLogo(ctx, g.ch == "*" ? .claude : .codex, in: CGRect(x: (W - side) / 2, y: (H - side) / 2, width: side, height: side), color: color)
+            } else if g.ch != " " {
                 let font = NSFont(name: "HelveticaNeue-Medium", size: H * 0.64) ?? .systemFont(ofSize: H * 0.6, weight: .medium)
-                let color = g.style == .dim ? Pal.inkDim : Pal.ink
+                let color = g.style == .dim ? Pal.inkDim : (g.style == .coral ? Pal.coral : Pal.ink)
                 let line = CTLineCreateWithAttributedString(NSAttributedString(string: String(g.ch), attributes: [.font: font, .foregroundColor: color]))
                 let b = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
                 ctx.saveGState()
@@ -388,7 +393,7 @@ final class FlipBoardView: NSView {
 
         // column labels, small and quiet
         let font = NSFont(name: "HelveticaNeue-Medium", size: 7 * s) ?? .systemFont(ofSize: 7 * s, weight: .medium)
-        for (c, label) in BoardLayout.labels.enumerated() {
+        for (c, label) in BoardLayout.labels.enumerated() where !label.isEmpty {
             let line = CTLineCreateWithAttributedString(NSAttributedString(string: label, attributes: [
                 .font: font, .kern: 1.4 * s, .foregroundColor: Pal.label]))
             ctx.saveGState()
@@ -424,17 +429,18 @@ extension FlipBoardView: ThemeView {
         let c = BoardLayout.cols
         var g: [Glyph] = []
         for ch in flapText(row.time, c[0]) { g.append(Glyph(ch: ch, style: text)) }
-        for ch in flapText(row.name, c[1]) { g.append(Glyph(ch: ch, style: text)) }
-        for ch in flapText(row.activity, c[2]) { g.append(Glyph(ch: ch, style: text)) }
+        g.append(row.placeholder ? Glyph.blank : (row.agent == .claude ? Glyph(ch: "*", style: .coral) : Glyph(ch: "§", style: text)))
+        for ch in flapText(row.name, c[2]) { g.append(Glyph(ch: ch, style: text)) }
+        for ch in flapText(row.activity, c[3]) { g.append(Glyph(ch: ch, style: text)) }
         if row.placeholder {
-            for _ in 0..<c[3] { g.append(Glyph.blank) }
+            for _ in 0..<c[4] { g.append(Glyph.blank) }
             return g
         }
         let tiles: [SessionState: FlapStyle] = [.working: .blue, .needs: .yellow, .turn: .green, .error: .red, .idle: .dark]
         let lit: FlapStyle = (row.state == .needs && !row.blinkOn) ? FlapStyle.dark : (tiles[row.state] ?? .dark)
         g.append(Glyph.tile(lit))
         g.append(Glyph.blank)
-        for ch in flapText(row.statusWord, c[3] - 2) { g.append(Glyph(ch: ch, style: text)) }
+        for ch in flapText(row.statusWord, c[4] - 2) { g.append(Glyph(ch: ch, style: text)) }
         return g
     }
 }

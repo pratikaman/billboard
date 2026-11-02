@@ -22,7 +22,7 @@ enum Pref {
 let timeFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
 
 func rowData(_ s: Session, blinkOn: Bool) -> RowData {
-    RowData(time: timeFmt.string(from: s.since), name: s.name, activity: s.activity, state: s.state, blinkOn: blinkOn)
+    RowData(time: timeFmt.string(from: s.since), name: s.name, activity: s.activity, state: s.state, agent: s.agent, blinkOn: blinkOn)
 }
 
 /// Which sessions get a row: everything, unless there are more than `max` — then the ones that most
@@ -213,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         for s in sessions {
             let status = rowData(s, blinkOn: true).statusWord
-            let i = item("\(s.name) — \(status)") { [weak self] in self?.open(s) }
+            let i = item("\(s.name) — \(status)\(s.agent == .codex ? "  (Codex)" : "")") { [weak self] in self?.open(s) }
             i.toolTip = [s.title, s.activity, s.cwd].filter { !$0.isEmpty }.joined(separator: "\n")
             menu.addItem(i)
         }
@@ -273,8 +273,8 @@ func demoSessions(since start: Date) -> [Session] {
     let t = Date().timeIntervalSince(start)
     let base = Date().addingTimeInterval(-600)
     func s(_ id: String, _ cwd: String, _ st: SessionState, _ act: String, _ ago: Double) -> Session {
-        Session(sid: id, cwd: cwd, title: "", state: st, activity: act, since: Date().addingTimeInterval(-ago),
-                updated: Date(), firstSeen: base.addingTimeInterval(Double(id.count)))
+        Session(sid: id, agent: id == "ccc" ? .codex : .claude, cwd: cwd, title: "", state: st, activity: act,
+                since: Date().addingTimeInterval(-ago), updated: Date(), firstSeen: base.addingTimeInterval(Double(id.count)))
     }
     let phase = Int(t / 4) % 4
     let acts = ["EDITING MAIN.SWIFT", "RUNNING BUILD.SH", "READING BOARD.SWIFT", "SEARCHING FLIPDURATION"]

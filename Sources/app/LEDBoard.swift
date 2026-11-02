@@ -59,6 +59,7 @@ private let font5x7: [Character: [String]] = [
     ")": [".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."],
     "@": [".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."],
     "*": [".....", "#.#.#", ".###.", "#####", ".###.", "#.#.#", "....."],
+    ">": [".#...", "..#..", "...#.", "....#", "...#.", "..#..", ".#..."],
 ]
 
 private func ledText(_ s: String) -> [Character] {
@@ -76,7 +77,7 @@ private struct LEDLayout {
     var scale: CGFloat = 1
     var rows = 1
     static let colChars = [5, 11, 24, 9]       // TIME, SESSION, NOW, STATUS
-    static let gapDots = 8
+    static let gaps = [11, 8, 8]               // the first gap holds the agent mark
     static let margin = 4
     static let rowDots = 11                    // 7 lit rows + 4 spacing
 
@@ -85,7 +86,7 @@ private struct LEDLayout {
     var rodLen: CGFloat { 18 * scale }
     var shadowPad: CGFloat { 18 * scale }
 
-    static var gridCols: Int { margin * 2 + colChars.reduce(0, +) * 6 - 1 + gapDots * (colChars.count - 1) }
+    static var gridCols: Int { margin * 2 + colChars.reduce(0, +) * 6 - 1 + gaps.reduce(0, +) }
     var gridRows: Int { rows * Self.rowDots - 4 + 6 }
 
     var display: CGRect {
@@ -96,14 +97,17 @@ private struct LEDLayout {
 
     func colDot(_ c: Int) -> Int {
         var x = Self.margin
-        for i in 0..<c { x += Self.colChars[i] * 6 - 1 + Self.gapDots }
+        for i in 0..<c { x += Self.colChars[i] * 6 - 1 + Self.gaps[i] }
         return x
     }
+    /// Width in dots of column c (column 4 is the one-glyph agent mark).
+    static func width(_ c: Int) -> Int { c == 4 ? 5 : colChars[c] * 6 - 1 }
     /// Rect of column c in row r (exactly the 7 dot rows of text).
     func cell(row r: Int, col c: Int) -> CGRect {
-        let x = display.minX + CGFloat(colDot(c)) * p
+        let xDot = c == 4 ? colDot(0) + Self.width(0) + 3 : colDot(c)
+        let x = display.minX + CGFloat(xDot) * p
         let y = display.minY + CGFloat(3 + r * Self.rowDots) * p
-        return CGRect(x: x, y: y, width: CGFloat(Self.colChars[c] * 6 - 1) * p, height: 7 * p)
+        return CGRect(x: x, y: y, width: CGFloat(Self.width(c)) * p, height: 7 * p)
     }
 }
 
@@ -128,7 +132,7 @@ final class LEDBoardView: NSView, ThemeView {
     private var timer: Timer?
     var onFlap: ((Int) -> Void)?
 
-    static let amber = 0xffa41c, dimAmber = 0x6b4810
+    static let amber = 0xffa41c, dimAmber = 0x6b4810, claudeMark = 0xff6a3d, codexMark = 0xe8eef8
     static let statusColor: [SessionState: Int] = [.working: 0x4aa3ff, .needs: 0xffd21f, .turn: 0x39e26a, .error: 0xff3b30, .idle: 0x6b4810]
     static let rollStep: CFTimeInterval = 0.032
     static let marqueeStep: CFTimeInterval = 0.045
@@ -142,7 +146,7 @@ final class LEDBoardView: NSView, ThemeView {
         if scale != L.scale { strips.removeAll(); sprites.removeAll() }
         L.rows = rows
         L.scale = scale
-        while cells.count < rows { cells.append(Array(repeating: LEDCell(), count: 4)) }
+        while cells.count < rows { cells.append(Array(repeating: LEDCell(), count: 5)) }
         if cells.count > rows { cells.removeLast(cells.count - rows) }
         background = nil
         needsDisplay = true
@@ -157,6 +161,7 @@ final class LEDBoardView: NSView, ThemeView {
                 (String(flapText(row.name, LEDLayout.colChars[1])).trimmingCharacters(in: .whitespaces), textColor),
                 (row.activity, textColor),
                 (row.placeholder ? "" : row.statusWord, Self.statusColor[row.state] ?? Self.amber),
+                (row.placeholder ? "" : (row.agent == .claude ? "*" : ">"), row.agent == .claude ? Self.claudeMark : Self.codexMark),
             ]
             for (c, (s, color)) in cols.enumerated() {
                 let t = ledText(s)
@@ -196,7 +201,7 @@ final class LEDBoardView: NSView, ThemeView {
         for r in cells.indices { for c in cells[r].indices {
             let cell = cells[r][c]
             let rolling = now - cell.rollStart < 9 * Self.rollStep
-            let scrolls = CGFloat(cell.text.count * 6 - 1) > CGFloat(LEDLayout.colChars[c] * 6 - 1)
+            let scrolls = cell.text.count * 6 - 1 > LEDLayout.width(c)
             if rolling || now < cell.rollStart || scrolls {
                 busy = true
                 setNeedsDisplay(L.cell(row: r, col: c).insetBy(dx: -L.p, dy: -L.p))
@@ -222,6 +227,15 @@ final class LEDBoardView: NSView, ThemeView {
     private func drawCell(_ ctx: CGContext, _ cell: LEDCell, rect: CGRect, col: Int, now: CFTimeInterval) {
         guard !cell.hidden else { return }
         let p = L.p
+        if col == 4, let mark = cell.text.first, mark == ">" || mark == "*", now - cell.rollStart > 0 {   // a backlit logo badge
+            let side = 7 * p
+            ctx.saveGState()
+            let px = window?.backingScaleFactor ?? 2
+            ctx.setShadow(offset: .zero, blur: 2.2 * p * px, color: rgb(cell.color, 0.7).cgColor)
+            drawAgentLogo(ctx, mark == "*" ? .claude : .codex, in: CGRect(x: rect.midX - side / 2, y: rect.minY, width: side, height: side), color: rgb(cell.color))
+            ctx.restoreGState()
+            return
+        }
         ctx.saveGState()
         ctx.clip(to: rect.insetBy(dx: -p * 0.5, dy: -p * 0.5))
         let elapsed = now - cell.rollStart

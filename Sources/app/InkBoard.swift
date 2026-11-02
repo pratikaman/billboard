@@ -159,6 +159,11 @@ final class InkBoardView: NSView, ThemeView {
         }
         let timeF = font("AvenirNextCondensed-DemiBold", 11.5)
         drawText(ctx, row.time, font: timeF, color: row.state == .needs ? Self.red : text, x: L.colX(0), baseline: base)
+        if !row.placeholder {
+            let mx = L.colX(1) - 9 * s
+            let color = idle ? Self.grey : (row.agent == .claude ? Self.red : Self.ink)   // Claude in the panel's red ink
+            drawAgentLogo(ctx, row.agent, in: CGRect(x: mx - 5 * s, y: base - 9 * s, width: 10 * s, height: 10 * s), color: color)
+        }
         let nameF = font("AvenirNext-DemiBold", 11.5)
         drawText(ctx, fit(row.name, width: InkLayout.colW[1] * s, font: nameF), font: nameF, color: text, x: L.colX(1), baseline: base)
         let actF = font("AvenirNext-Regular", 11.5)

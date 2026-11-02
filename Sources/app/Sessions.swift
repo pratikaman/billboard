@@ -1,5 +1,6 @@
-// Reads the per-session state files that billboard-hook writes, plus a little from each transcript
-// (the AI-generated session title, and "[Request interrupted by user" which has no hook event).
+// Reads the per-session state files that billboard-hook writes (Claude Code and Codex CLI sessions alike),
+// plus a little from each transcript: the session title, and interrupts, which have no hook event
+// ("[Request interrupted by user" in Claude transcripts, "turn_aborted" in Codex rollouts).
 import Foundation
 import Darwin
 
@@ -9,8 +10,14 @@ enum SessionState: String {
     var rank: Int { [.needs: 0, .error: 1, .turn: 2, .working: 3, .idle: 4][self]! }
 }
 
+enum Agent: String {
+    case claude, codex
+    var title: String { self == .claude ? "Claude" : "Codex" }
+}
+
 struct Session: Equatable {
     var sid: String
+    var agent: Agent = .claude
     var cwd: String
     var title: String
     var state: SessionState
@@ -24,7 +31,7 @@ struct Session: Equatable {
         let folder = (cwd as NSString).lastPathComponent
         let generic: Set<String> = ["", "/", "Downloads", "Desktop", "Documents", "tmp", "scratchpad", NSUserName()]
         if (generic.contains(folder) || cwd == NSHomeDirectory()), !title.isEmpty { return title }
-        return folder.isEmpty ? (title.isEmpty ? "CLAUDE" : title) : folder
+        return folder.isEmpty ? (title.isEmpty ? agent.title : title) : folder
     }
 }
 
@@ -38,9 +45,10 @@ final class SessionStore {
     /// A finished session counts as "your turn" this long, then fades to idle.
     var turnFreshness: TimeInterval = 15 * 60
 
-    private struct TranscriptInfo { var offset: UInt64 = 0; var title = ""; var interruptedAt: Date? }
+    private struct TranscriptInfo { var path = ""; var offset: UInt64 = 0; var title = ""; var interruptedAt: Date?; var lastLookup = Date.distantPast }
     private var transcripts: [String: TranscriptInfo] = [:]
     private var firstSeen: [String: Date] = [:]
+    private var codexTitles: [String: (mtime: Date, titles: [String: String])] = [:]   // per CODEX_HOME
 
     func load() -> [Session] {
         let fm = FileManager.default
@@ -53,6 +61,7 @@ final class SessionStore {
                   let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let sid = j["sid"] as? String else { continue }
             let updated = Date(timeIntervalSince1970: j["updated"] as? Double ?? 0)
+            let agent = Agent(rawValue: j["agent"] as? String ?? "") ?? .claude
 
             // Gone: the CLI process exited without SessionEnd (closed terminal, crash), or a stale file with no pid.
             if let pid = j["pid"] as? Int {
@@ -60,7 +69,14 @@ final class SessionStore {
             } else if now.timeIntervalSince(updated) > 6 * 3600 { unlink(path); continue }
 
             var info = transcripts[sid] ?? TranscriptInfo()
-            if let t = j["transcript"] as? String { scan(t, &info) }
+            if let t = j["transcript"] as? String { info.path = t }
+            let home = j["home"] as? String
+            if agent == .codex, info.path.isEmpty, let home, now.timeIntervalSince(info.lastLookup) > 10 {
+                info.lastLookup = now
+                info.path = findCodexRollout(home: home, sid: sid) ?? ""
+            }
+            if !info.path.isEmpty { scan(info.path, &info) }
+            if agent == .codex, let home, let t = codexTitle(home: home, sid: sid) { info.title = t }
             transcripts[sid] = info
 
             var state = SessionState(rawValue: j["state"] as? String ?? "idle") ?? .idle
@@ -76,14 +92,14 @@ final class SessionStore {
 
             let seen = firstSeen[sid] ?? updated
             firstSeen[sid] = seen
-            out.append(Session(sid: sid, cwd: j["cwd"] as? String ?? "", title: info.title, state: state,
+            out.append(Session(sid: sid, agent: agent, cwd: j["cwd"] as? String ?? "", title: info.title, state: state,
                                activity: activity, since: since, updated: updated, firstSeen: seen))
         }
         return out.sorted { ($0.firstSeen, $0.sid) < ($1.firstSeen, $1.sid) }
     }
 
-    /// Reads only the bytes added since last time (first time: the last 2 MB) and picks out
-    /// the newest {"type":"ai-title","aiTitle":…} and any user interrupt.
+    /// Reads only the bytes added since last time (first time: the last 2 MB) and picks out the newest
+    /// Claude {"type":"ai-title"} and any interrupt.
     private func scan(_ path: String, _ info: inout TranscriptInfo) {
         guard let fh = FileHandle(forReadingAtPath: path) else { return }
         defer { try? fh.close() }
@@ -102,12 +118,48 @@ final class SessionStore {
                let j = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
                let t = j["aiTitle"] as? String, !t.isEmpty {
                 info.title = t
-            } else if line.range(of: Data("[Request interrupted by user".utf8)) != nil,
-                      line.range(of: Data("\"type\":\"user\"".utf8)) != nil,
-                      let j = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
-                      let ts = j["timestamp"] as? String, let at = Self.iso.date(from: ts) {
+            } else if isInterrupt(line), let j = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                      let ts = j["timestamp"] as? String, let at = Self.iso.date(from: ts) ?? Self.isoPlain.date(from: ts) {
                 info.interruptedAt = max(info.interruptedAt ?? .distantPast, at)
             }
         }
+    }
+
+    private func isInterrupt(_ line: Data.SubSequence) -> Bool {
+        if line.range(of: Data("[Request interrupted by user".utf8)) != nil, line.range(of: Data("\"type\":\"user\"".utf8)) != nil { return true }
+        return line.count < 4000 && line.range(of: Data("\"turn_aborted\"".utf8)) != nil
+    }
+
+    static let isoPlain: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f }()
+
+    /// Codex names each thread in $CODEX_HOME/session_index.jsonl ({"id":…,"thread_name":…}); re-read when it changes.
+    private func codexTitle(home: String, sid: String) -> String? {
+        let path = home + "/session_index.jsonl"
+        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date else { return nil }
+        if codexTitles[home]?.mtime != mtime, let text = try? String(contentsOfFile: path, encoding: .utf8) {
+            var titles: [String: String] = [:]
+            for line in text.split(separator: "\n") {
+                guard let j = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                      let id = j["id"] as? String, let name = j["thread_name"] as? String, !name.isEmpty else { continue }
+                titles[id] = name
+            }
+            codexTitles[home] = (mtime, titles)
+        }
+        return codexTitles[home]?.titles[sid]
+    }
+
+    /// Codex keeps rollouts at $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<session id>.jsonl.
+    private func findCodexRollout(home: String, sid: String) -> String? {
+        let fm = FileManager.default
+        let cal = Calendar(identifier: .gregorian)
+        for back in 0..<3 {
+            guard let day = cal.date(byAdding: .day, value: -back, to: Date()) else { continue }
+            let c = cal.dateComponents([.year, .month, .day], from: day)
+            let dir = String(format: "%@/sessions/%04d/%02d/%02d", home, c.year ?? 0, c.month ?? 0, c.day ?? 0)
+            if let hit = (try? fm.contentsOfDirectory(atPath: dir))?.first(where: { $0.contains(sid) && $0.hasSuffix(".jsonl") }) {
+                return dir + "/" + hit
+            }
+        }
+        return nil
     }
 }

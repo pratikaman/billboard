@@ -56,7 +56,7 @@ final class LetterBoardView: NSView, ThemeView {
     private var timer: Timer?
     var onFlap: ((Int) -> Void)?
 
-    static let white = 0xf3f0e8, dimWhite = 0x9c978e
+    static let white = 0xf3f0e8, dimWhite = 0x9c978e, claudeMark = 0xe8825f
     static let statusColor: [SessionState: Int] = [.working: 0x6cb4ee, .needs: 0xf5c443, .turn: 0x7fd69b, .error: 0xf2705f, .idle: 0x8e8a83]
     static let outTime: CFTimeInterval = 0.14, inTime: CFTimeInterval = 0.24
 
@@ -75,7 +75,7 @@ final class LetterBoardView: NSView, ThemeView {
         if scale != L.scale { letters.removeAll() }
         L.rows = rows
         L.scale = scale
-        while cols.count < rows { cols.append(Array(repeating: LetterCol(), count: 4)) }
+        while cols.count < rows { cols.append(Array(repeating: LetterCol(), count: 5)) }
         if cols.count > rows { cols.removeLast(cols.count - rows) }
         wiggle = Array(repeating: false, count: rows)
         background = nil
@@ -89,9 +89,10 @@ final class LetterBoardView: NSView, ThemeView {
             let parts: [(String, Int)] = [
                 (row.time, textColor), (row.name, textColor), (row.activity, textColor),
                 (row.placeholder ? "" : row.statusWord, Self.statusColor[row.state] ?? Self.white),
+                (row.placeholder ? "" : (row.agent == .claude ? "*" : "§"), row.agent == .claude ? Self.claudeMark : textColor),
             ]
             for (c, (s, color)) in parts.enumerated() {
-                let width = LetterLayout.colW[c] * L.s
+                let width = c == 4 ? 12 * L.s : LetterLayout.colW[c] * L.s
                 let t = Array(fit(s.uppercased(), width: width, font: font, kern: kern))
                 var col = cols[r][c]
                 guard col.text != t || col.color != color else { continue }
@@ -153,7 +154,11 @@ final class LetterBoardView: NSView, ThemeView {
     }
 
     private func drawCol(_ ctx: CGContext, _ col: LetterCol, row r: Int, col c: Int, now: CFTimeInterval) {
-        let x0 = L.colX(c), base = L.baseline(r), s = L.s
+        let s = L.s
+        // the agent mark sits a fixed gap before SESSION, whatever its width
+        let markW = c == 4 ? col.text.first.map { letter($0, col.color).adv } ?? 0 : 0
+        let x0 = c == 4 ? L.colX(1) - 4 * s - markW : L.colX(c)
+        let base = L.baseline(r)
         let t = now - col.start
         // wiggle: status letters of a session that needs you rock for half a second every 1.6 s
         var rock: CGFloat = 0
@@ -221,6 +226,17 @@ final class LetterBoardView: NSView, ThemeView {
         let key = "\(color)|\(ch)"
         if let l = letters[key] { return l }
         let f = font, s = L.s, pad = 3 * s
+        if ch == "§" || ch == "*" {   // agent marks as moulded plastic pieces: OpenAI logo (§) / Claude logo (*)
+            let side = L.capH * 1.08
+            let size = CGSize(width: side + pad * 2, height: L.capH + pad * 2 + 2 * s)
+            let px = window?.backingScaleFactor ?? 2
+            let ctx = makeFlippedContext(size: size, scale: px)!
+            ctx.setShadow(offset: CGSize(width: 0.5 * s * px, height: -1.1 * s * px), blur: 1.3 * s * px, color: NSColor(white: 0, alpha: 0.85).cgColor)
+            drawAgentLogo(ctx, ch == "*" ? .claude : .codex, in: CGRect(x: pad, y: pad + (L.capH - side) / 2, width: side, height: side), color: rgb(color))
+            let entry = (ctx.makeImage()!, side + kern * 2)
+            letters[key] = entry
+            return entry
+        }
         let adv = textWidth(String(ch), font: f) + kern
         let size = CGSize(width: max(adv, 2 * s) + pad * 2, height: L.capH + pad * 2 + 2 * s)
         let px = window?.backingScaleFactor ?? 2
